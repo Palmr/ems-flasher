@@ -260,7 +260,7 @@ int main(int argc, char **argv) {
 
     // read the ROM and save it into the file
     if (opts.mode == MODE_READ) {
-        FILE *save_file = fopen(opts.file, "w");
+        FILE *save_file = fopen(opts.file, "wb");
         if (save_file == NULL)
             err(1, "Can't open %s for writing", opts.file);
 
@@ -291,7 +291,7 @@ int main(int argc, char **argv) {
 
     // write ROM in the file to bank 1
     else if (opts.mode == MODE_WRITE) {
-        FILE *write_file = fopen(opts.file, "r");
+        FILE *write_file = fopen(opts.file, "rb");
         if (write_file == NULL) {
             if (space == TO_ROM)
                 err(1, "Can't open ROM file %s", opts.file);
