@@ -1,18 +1,12 @@
 #include <assert.h>
-#include <err.h>
 #include <errno.h>
-#include <signal.h>
-#include <stdio.h> // FIXME this will (probably) go away with error coes
-#include <stdlib.h>
-#include <string.h>
-#include <netinet/in.h>
-#include <arpa/inet.h> /* for htonl */
+#include <stdio.h>
+#include <libusb-1.0\libusb.h>
 
-#include <libusb.h>
-
+#include "defines.h"
 #include "ems.h"
 
-/* magic numbers! */
+/* EMS Cart vendor/product ID magic numbers */
 #define EMS_VID 0x4670
 #define EMS_PID 0x9394
 
@@ -20,14 +14,27 @@
 #define EMS_EP_RECV (1 | LIBUSB_ENDPOINT_IN)
 
 enum {
-    CMD_READ    = 0xff,
-    CMD_WRITE   = 0x57,
-    CMD_READ_SRAM   = 0x6d,
-    CMD_WRITE_SRAM  = 0x4d,
+  CMD_READ    		= 0xff,
+  CMD_WRITE				= 0x57,
+  CMD_READ_SRAM		= 0x6d,
+  CMD_WRITE_SRAM	= 0x4d,
 };
 
-static struct libusb_device_handle *devh = NULL;
+static const int _test = 0x1234;
+static const char * _ptest = (char*)&_test;
+uint32_t host_to_network_long(uint32_t host32) {
+	if(*_ptest == 0x12) {
+		return host32;
+	}
+	else {
+		return ((host32 & 0xff) << 24) | ((host32 & 0xff00) << 8) | ((host32 & 0xff0000) >> 8) | ((host32 & 0xff000000) >> 24);
+	}
+}
+
+static struct libusb_device_handle *device_handle = NULL;
 static int claimed = 0;
+
+int verbose_level = 0;
 
 /**
  * Attempt to find the EMS cart by vid/pid.
@@ -37,50 +44,66 @@ static int claimed = 0;
  *  < 0     failure
  */
 static int find_ems_device(void) {
-    ssize_t num_devices = 0;
-    libusb_device **device_list = NULL;
-    struct libusb_device_descriptor device_descriptor;
-    int i = 0;
-    int retval = 0;
+	ssize_t num_devices = 0;
+	libusb_device **device_list = NULL;
+	struct libusb_device_descriptor device_descriptor;
+	int i = 0;
+	int retval = 0;
 
-    num_devices = libusb_get_device_list(NULL, &device_list);
-    if (num_devices >= 0) {
-        for (; i < num_devices; ++i) {
-            (void) memset(&device_descriptor, 0, sizeof(device_descriptor));
-            retval = libusb_get_device_descriptor(device_list[i], &device_descriptor);
-            if (retval == 0) {
-                if (device_descriptor.idVendor == EMS_VID
-                    && device_descriptor.idProduct == EMS_PID) {
-                    retval = libusb_open(device_list[i], &devh);
-                    if (retval != 0) {
-                        /*
-                         * According to the documentation, devh will not
-                         * be populated on error, so it should remain
-                         * NULL.
-                         */
-                        fprintf(stderr, "Failed to open device (libusb error: %s).\n", libusb_error_name(retval));
-#ifdef __linux__                      
-                        if (retval == LIBUSB_ERROR_ACCESS) {
-                            fprintf(stderr, "Try running as root/sudo or update udev rules (check the FAQ for more info).\n");
-                        }
+	num_devices = libusb_get_device_list(NULL, &device_list);
+	if (verbose_level > 0) {
+		printf("Searching for EMS cart USB device:\n");
+	}
+
+	if (num_devices >= 0) {
+		for (; i < num_devices; ++i) {
+			(void) memset(&device_descriptor, 0, sizeof(device_descriptor));
+			retval = libusb_get_device_descriptor(device_list[i], &device_descriptor);
+			if (retval == 0) {
+				if (verbose_level > 0) {
+					printf("  [%d/%d] %04x:%04x (bus %d, device %d)\n", (i+1), num_devices,
+																															device_descriptor.idVendor, device_descriptor.idProduct,
+																															libusb_get_bus_number(device_list[i]), libusb_get_device_address(device_list[i]));
+				}
+
+				if (device_descriptor.idVendor == EMS_VID && device_descriptor.idProduct == EMS_PID) {
+					retval = libusb_open(device_list[i], &device_handle);
+					if (retval != 0) {
+							/*
+							 * According to the documentation, device_handle will not
+							 * be populated on error, so it should remain
+							 * NULL.
+							 */
+							fprintf(stderr, "Failed to open device (libusb error: %s).\n", libusb_error_name(retval));
+#ifdef __linux__
+							if (retval == LIBUSB_ERROR_ACCESS) {
+								fprintf(stderr, "Try running as root/sudo or update udev rules (check the FAQ for more info).\n");
+							}
 #endif
-                    }
-                    break;
-                }
-            } else {
-                fprintf(stderr, "Failed to get device description (libusb error: %s).\n", libusb_error_name(retval));
-            }
-        }
-        if (i == num_devices) {
-            fprintf(stderr, "Could not find device, is it plugged in?\n");
-        }
-        libusb_free_device_list(device_list, 1);
-        device_list = NULL;
-    } else {
-      fprintf(stderr, "Failed to get device list: %s\n", libusb_error_name((int)num_devices));
-    }
+					}
+					else {
+						if (verbose_level > 0) {
+							printf("  EMS cart found!\n");
+						}
+					}
+					break;
+				}
+			}
+			else {
+				fprintf(stderr, "Failed to get device description (libusb error: %s).\n", libusb_error_name(retval));
+			}
+		}
+		if (i == num_devices) {
+			fprintf(stderr, "Could not find device, is it plugged in?\n");
+		}
+		libusb_free_device_list(device_list, 1);
+		device_list = NULL;
+	}
+	else {
+		fprintf(stderr, "Failed to get device list: %s\n", libusb_error_name((int)num_devices));
+	}
 
-    return devh != NULL ? 0 : -EIO;
+	return device_handle != NULL ? 0 : -ENODEV;
 }
 
 /**
@@ -93,43 +116,60 @@ static int find_ems_device(void) {
  *  0       Success
  *  < 0     Failure
  */
-int ems_init(void) {
-    int r;
-    void ems_deinit(void);
+int ems_init(int verbosity) {
+	int retval;
 
-    // call the cleanup when we're done
-    atexit(ems_deinit);
+	verbose_level = verbosity;
 
-    r = libusb_init(NULL);
-    if (r < 0) {
-        fprintf(stderr, "failed to initialize libusb\n");
-        exit(1); // pretty much hosed
-    }
+	// Make sure we let the device go when we're done
+	void ems_deinit(void);
+	atexit(ems_deinit);
 
-    r = find_ems_device();
-    if (r < 0) {
-        return r;
-    }
+	retval = libusb_init(NULL);
+	if (retval != 0) {
+		fprintf(stderr, "Failed to initialize libusb: %d\n", retval);
+		exit(retval);
+	}
 
-    r = libusb_claim_interface(devh, 0);
-    if (r < 0) {
-        fprintf(stderr, "usb_claim_interface error %d\n", r);
-        return r;
-    }
+	retval = find_ems_device();
+	if (retval != 0) {
+		fprintf(stderr, "Failed to find device: %d\n", retval);
+		return retval;
+	}
 
-    claimed = 1;
-    return 0;
+	retval = libusb_claim_interface(device_handle, 0);
+	if (retval != 0) {
+		fprintf(stderr, "Failed to claim device: %d\n", retval);
+		return retval;
+	}
+	else {
+		claimed = 1;
+	}
+	
+	if (verbose_level > 0) {
+		printf("EMS cart found and claimed\n");
+	}
+
+	return 0;
 }
 
 /**
  * Cleanup / release the device. Registered with atexit.
  */
 void ems_deinit(void) {
-    if (claimed)
-        libusb_release_interface(devh, 0);
+	if (claimed) {
+		int retval = libusb_release_interface(device_handle, 0);
+		if (retval != 0) {
+			fprintf(stderr, "Failed to release device: %d\n", retval);
+		}
+	}
 
-    libusb_close(devh);
-    libusb_exit(NULL);
+	libusb_close(device_handle);
+	libusb_exit(NULL);
+	
+	if (verbose_level > 0) {
+		printf("Deinitialising EMS cart\n");
+	}
 }
 
 /**
@@ -145,8 +185,8 @@ static void ems_command_init(
         uint32_t val        // value
 ) {
     buf[0] = cmd;
-    *(uint32_t *)(buf + 1) = htonl(addr);
-    *(uint32_t *)(buf + 5) = htonl(val);
+    *(uint32_t *)(buf + 1) = host_to_network_long(addr);
+    *(uint32_t *)(buf + 5) = host_to_network_long(val);
 }
 
 /**
@@ -172,20 +212,13 @@ int ems_read(int from, uint32_t offset, unsigned char *buf, size_t count) {
     cmd = from == FROM_ROM ? CMD_READ : CMD_READ_SRAM;
     ems_command_init(cmd_buf, cmd, offset, count);
 
-#ifdef DEBUG
-    int i;
-    for (i = 0; i < 9; ++i)
-        printf("%02x ", cmd_buf[i]);
-    printf("\n");
-#endif
-
     // send the read command
-    r = libusb_bulk_transfer(devh, EMS_EP_SEND, cmd_buf, sizeof(cmd_buf), &transferred, 0);
+    r = libusb_bulk_transfer(device_handle, EMS_EP_SEND, cmd_buf, sizeof(cmd_buf), &transferred, 0);
     if (r < 0)
         return r;
 
     // read the data
-    r = libusb_bulk_transfer(devh, EMS_EP_RECV, buf, count, &transferred, 0);
+    r = libusb_bulk_transfer(device_handle, EMS_EP_RECV, buf, count, &transferred, 0);
     if (r < 0)
         return r;
 
@@ -213,16 +246,19 @@ int ems_write(int to, uint32_t offset, unsigned char *buf, size_t count) {
     assert(to == TO_ROM || to == TO_SRAM);
     cmd = to == TO_ROM ? CMD_WRITE : CMD_WRITE_SRAM;
 
+		
     // thx libusb for having no scatter/gather io
     write_buf = malloc(count + 9);
-    if (write_buf == NULL)
-        err(1, "malloc");
-    
+    if (write_buf == NULL) {
+      printf("malloc\n");
+      return 1;
+    }
+
     // set up the command buffer
     ems_command_init(write_buf, cmd, offset, count);
     memcpy(write_buf + 9, buf, count);
 
-    r = libusb_bulk_transfer(devh, EMS_EP_SEND, write_buf, count + 9, &transferred, 0);
+    r = libusb_bulk_transfer(device_handle, EMS_EP_SEND, write_buf, count + 9, &transferred, 0);
     if (r == 0)
         r = transferred; // return number of bytes sent on success
 
